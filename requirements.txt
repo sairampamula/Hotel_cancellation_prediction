@@ -1,0 +1,11 @@
+# Hotel Booking Cancellation Prediction
+# Install with: pip install -r requirements.txt
+
+streamlit
+numpy
+pandas
+scikit-learn
+cloudpickle
+category-encoders
+optuna
+mlflow
