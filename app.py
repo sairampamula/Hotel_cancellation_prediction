@@ -1,7 +1,9 @@
+import datetime as dt
 import json
 from pathlib import Path
 
 import cloudpickle
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -18,7 +20,6 @@ st.set_page_config(
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_CANDIDATES = [
     BASE_DIR / "final_model.pkl",
-    BASE_DIR / "best_model.pkl",
 ]
 SCHEMA_PATH = BASE_DIR / "input_schema.json"
 
@@ -65,8 +66,11 @@ except Exception as exc:
     st.stop()
 
 schema = load_schema()
+st.sidebar.caption(
+    f"Model: {type(model.named_steps['classifier']).__name__} ({model_path.name})"
+)
 categorical_options = schema.get("categorical_options", {})
-arrival_year_options = schema.get("arrival_year_options", [2015, 2016, 2017])
+agent_options = [int(a) for a in schema.get("agent_options", [])]
 
 # Fallback options are used only if input_schema.json is unavailable.
 DEFAULT_OPTIONS = {
@@ -85,6 +89,10 @@ DEFAULT_OPTIONS = {
         "July", "August", "September", "October", "November", "December",
     ],
 }
+
+
+DEFAULT_COUNTRIES = ["PRT", "GBR", "FRA", "ESP", "DEU", "ITA", "IRL", "BEL",
+                     "BRA", "NLD", "USA", "CHE", "Unknown"]
 
 
 def choices_for(column):
@@ -114,26 +122,26 @@ with st.form("booking_details"):
 
     with c1:
         hotel = select_value("hotel")
-        arrival_date_month = select_value("arrival_date_month")
-        arrival_date_year = st.selectbox(
-            "Arrival Date Year",
-            [int(value) for value in arrival_year_options],
-            index=0,
+        arrival = st.date_input(
+            "Arrival Date",
+            value=dt.date.today() + dt.timedelta(days=30),
+            min_value=dt.date.today(),
         )
 
     with c2:
-        arrival_date_week_number = st.number_input(
-            "Arrival Date Week Number", min_value=1, max_value=53, value=27
-        )
-        arrival_date_day_of_month = st.number_input(
-            "Arrival Date Day", min_value=1, max_value=31, value=15
-        )
         market_segment = select_value("market_segment")
+        distribution_channel = select_value("distribution_channel")
 
     with c3:
-        distribution_channel = select_value("distribution_channel")
         reserved_room_type = select_value("reserved_room_type")
         meal = select_value("meal")
+
+    # The four arrival columns the model expects, derived from one date
+    MONTHS = DEFAULT_OPTIONS["arrival_date_month"]
+    arrival_date_year = arrival.year
+    arrival_date_month = MONTHS[arrival.month - 1]
+    arrival_date_day_of_month = arrival.day
+    arrival_date_week_number = arrival.isocalendar()[1]
 
     st.divider()
     st.subheader("2. Stay and guest details")
@@ -158,12 +166,20 @@ with st.form("booking_details"):
 
     with c3:
         customer_type = select_value("customer_type")
-        country_default = "PRT"
-        country_options = categorical_options.get("country", [])
-        if country_options and country_default not in [str(x) for x in country_options]:
-            country_default = str(country_options[0])
-        country = st.text_input("Country (3-letter code)", value=country_default)
-        agent = st.number_input("Agent ID (0 if unknown)", min_value=0, value=9, step=1)
+        country_list = [str(c) for c in categorical_options.get("country", [])] or DEFAULT_COUNTRIES
+        if "Unknown" not in country_list:
+            country_list.append("Unknown")
+        country = st.selectbox(
+            "Country",
+            country_list,
+            index=country_list.index("PRT") if "PRT" in country_list else 0,
+        )
+        if agent_options:
+            agent_choice = st.selectbox("Agent ID", ["Unknown"] + agent_options)
+        else:
+            agent_choice = st.number_input(
+                "Agent ID (0 if unknown)", min_value=0, value=0, step=1
+            )
 
     st.divider()
     st.subheader("3. Booking history and preferences")
@@ -226,7 +242,7 @@ if submitted:
         "children": int(children),
         "babies": int(babies),
         "meal": meal,
-        "country": country.strip() or "Unknown",
+        "country": country,
         "market_segment": market_segment,
         "distribution_channel": distribution_channel,
         "is_repeated_guest": int(is_repeated_guest),
@@ -235,7 +251,8 @@ if submitted:
         "reserved_room_type": reserved_room_type,
         "booking_changes": int(booking_changes),
         "deposit_type": deposit_type,
-        "agent": int(agent),
+        # Missing agents were the category "Unknown" in training (NaN here)
+        "agent": np.nan if agent_choice in ("Unknown", 0) else int(agent_choice),
         "customer_type": customer_type,
         "adr": float(adr),
         "required_car_parking_spaces": int(required_car_parking_spaces),
@@ -269,8 +286,8 @@ if submitted:
         else:
             st.success("✅ The model predicts that this booking is likely to be retained.")
 
-        # The trained SVM configuration is not probability-calibrated by default.
-        # This app supports probabilities where the selected saved model provides them.
+        # Models were trained with class_weight="balanced", so these scores lean
+        # towards "cancel" and are a risk score, not a calibrated probability.
         if hasattr(model, "predict_proba"):
             probabilities = model.predict_proba(input_df)[0]
             classes = list(model.classes_)
@@ -279,12 +296,12 @@ if submitted:
                 retention_probability = 1.0 - cancellation_probability
 
                 m1, m2 = st.columns(2)
-                m1.metric("Cancellation probability", f"{cancellation_probability:.1%}")
-                m2.metric("Retention probability", f"{retention_probability:.1%}")
+                m1.metric("Cancellation risk score", f"{cancellation_probability:.1%}")
+                m2.metric("Retention score", f"{retention_probability:.1%}")
 
                 st.progress(
                     max(0.0, min(1.0, cancellation_probability)),
-                    text="Estimated cancellation probability",
+                    text="Estimated cancellation risk",
                 )
         else:
             st.info(
@@ -297,7 +314,8 @@ if submitted:
 
         st.caption(
             "This prediction is an estimate from the trained machine-learning "
-            "model, not a guarantee of the booking outcome."
+            "model, not a guarantee of the booking outcome. The risk score is "
+            "not a calibrated probability."
         )
 
     except Exception as exc:
