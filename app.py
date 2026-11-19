@@ -66,9 +66,7 @@ except Exception as exc:
     st.stop()
 
 schema = load_schema()
-st.sidebar.caption(
-    f"Model: {type(model.named_steps['classifier']).__name__} ({model_path.name})"
-)
+
 categorical_options = schema.get("categorical_options", {})
 agent_options = [int(a) for a in schema.get("agent_options", [])]
 
